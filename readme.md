@@ -66,4 +66,4 @@ CODE STRUCTURE (Current & Documented)
 • recurring_populator.gs → Monthly sheet creation logic.
 • dashboard.gs → Calculations and logic for the main dashboard.
 • utils.gs → Shared constants and helper functions.
-• readme.md → This project plan.
+• readme.gs → This project plan.
