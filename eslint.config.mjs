@@ -39,7 +39,7 @@ export default defineConfig([
         ...gasGlobals,
         ...projectGlobals,
       },
-      sourceType: "script",
+      sourceType: "module",
       ecmaVersion: 2020,
     },
     rules: {
