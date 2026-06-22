@@ -215,7 +215,6 @@ function cleanAndInjectBankCSV(importRows) {
         });
         dayData.notes[i][0] = note;
         dayData.backgrounds[i][0] = "#d9d9d9"; // Update cache immediately.
-        placed = true;
         transactionsMatched++;
         break;
       }

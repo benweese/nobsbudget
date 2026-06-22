@@ -1,3 +1,5 @@
+/* exported SHEET_NAMES, LAYOUT, columnToLetter, isRecurringDateMatch */
+
 /**
  * This script file serves as a central library of shared constants and helper functions
  * for the entire project. It does not contain functions that are run directly by the user.
@@ -32,7 +34,7 @@ const LAYOUT = {
  * @return {string} The column letter(s).
  */
 function columnToLetter(column) {
-  let temp = '', letter = '';
+  let temp, letter = '';          // ← was: let temp = '', letter = '';
   while (column > 0) {
     temp = (column - 1) % 26;
     letter = String.fromCharCode(temp + 65) + letter;
@@ -43,53 +45,89 @@ function columnToLetter(column) {
 
 /**
  * The single source of truth for determining if a recurring item rule matches a given date.
- * Centralizing this logic prevents bugs and ensures consistency across the application.
- * @param {Date} dateToCheck The date we are checking.
- * @param {Object} rule An object with the rule's properties: {dayOfMonthRaw, frequency, startDate}.
- * @return {boolean} True if the rule matches the date.
+ * Supports week-based cadences (weekly/biweekly/triweekly or "N Weeks(Weekday)") and
+ * month-based cadences (monthly/bimonthly/quarterly/semiannually/annually or "N Months"/"N Years").
+ * @param {Date} dateToCheck The date being tested.
+ * @param {Object} rule The rule: { dayOfMonthRaw, frequency, startDate }.
+ * @return {boolean} True if the rule fires on dateToCheck.
  */
 function isRecurringDateMatch(dateToCheck, rule) {
   const { dayOfMonthRaw, frequency, startDate } = rule;
   const freq = String(frequency).toLowerCase();
 
-  if (freq.startsWith('monthly')) {
-    const dayOfMonth = String(dayOfMonthRaw).toLowerCase();
-    if (dayOfMonth === 'last') {
-      const lastDayOfMonth = new Date(dateToCheck.getFullYear(), dateToCheck.getMonth() + 1, 0).getDate();
-      return dateToCheck.getDate() === lastDayOfMonth;
+  const targetWeekday = freq.match(/\((\w+)\)/i)?.[1]?.toLowerCase();
+  const weekDayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+
+  // --- WEEK-INTERVAL FREQUENCIES ---
+  const WEEK_ALIASES = { weekly: 1, biweekly: 2, triweekly: 3 };
+  let interval = null;
+
+  for (const alias in WEEK_ALIASES) {
+    if (freq.startsWith(alias)) { interval = WEEK_ALIASES[alias]; break; }
+  }
+  if (interval === null) {
+    const numericMatch = freq.match(/(\d+)\s*week/);
+    if (numericMatch && parseInt(numericMatch[1], 10) >= 1) {
+      interval = parseInt(numericMatch[1], 10);
     }
-    return parseInt(dayOfMonthRaw) === dateToCheck.getDate();
   }
 
-  const targetWeekday = freq.match(/\((\w+)\)/i)?.[1]?.toLowerCase();
-  const weekDayMap = { 'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3, 'thursday': 4, 'friday': 5, 'saturday': 6 };
-  
-  if (freq.startsWith('weekly')) {
-    if (!targetWeekday) return false;
-    return dateToCheck.getDay() === weekDayMap[targetWeekday];
-  }
-  
-  if (freq.startsWith('biweekly')) {
-    if (!startDate || !targetWeekday || dateToCheck < startDate) return false;
-    if (dateToCheck.getDay() !== weekDayMap[targetWeekday]) return false;
-    // Zero out the time to prevent daylight saving issues from affecting week calculation.
-    const diffTime = Math.abs(dateToCheck.setHours(0,0,0,0) - startDate.setHours(0,0,0,0));
-    const diffWeeks = Math.floor(diffTime / (1000 * 60 * 60 * 24 * 7));
-    return diffWeeks % 2 === 0; // It's a match if it's an even number of weeks from the start.
-  }
-  
-  if (freq.startsWith('bimonthly')) {
+  if (interval !== null) {
+    if (!targetWeekday || dateToCheck.getDay() !== weekDayMap[targetWeekday]) return false;
+    if (interval === 1) return true;
     if (!startDate || dateToCheck < startDate) return false;
-    // Bimonthly is based on the day of the month of the start date.
-    if (dateToCheck.getDate() !== startDate.getDate()) return false;
-    const monthDiff = (dateToCheck.getMonth() - startDate.getMonth()) + (12 * (dateToCheck.getFullYear() - startDate.getFullYear()));
-    return monthDiff >= 0 && monthDiff % 2 === 0; // It's a match if it's an even number of months from the start.
+
+    // UTC midnight day-count avoids daylight-saving drift across the interval.
+    const MS_PER_DAY = 86400000;
+    const toDayNumber = (d) => Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / MS_PER_DAY);
+    const weeksApart = (toDayNumber(dateToCheck) - toDayNumber(startDate)) / 7;
+
+    return weeksApart >= 0 && weeksApart % interval === 0;
   }
-  
-  if (freq.startsWith('annually')) {
-    if (!startDate) return false;
-    return dateToCheck.getMonth() === startDate.getMonth() && dateToCheck.getDate() === startDate.getDate();
+
+  // --- MONTH-INTERVAL FREQUENCIES ---
+  const MONTH_ALIASES = { monthly: 1, bimonthly: 2, quarterly: 3, semiannually: 6, annually: 12 };
+  let monthInterval = null;
+
+  for (const alias in MONTH_ALIASES) {
+    if (freq.startsWith(alias)) { monthInterval = MONTH_ALIASES[alias]; break; }
   }
-  
+  if (monthInterval === null) {
+    const yearMatch = freq.match(/(\d+)\s*year/);
+    const monthMatch = freq.match(/(\d+)\s*month/);
+    if (yearMatch && parseInt(yearMatch[1], 10) >= 1) {
+      monthInterval = parseInt(yearMatch[1], 10) * 12;
+    } else if (monthMatch && parseInt(monthMatch[1], 10) >= 1) {
+      monthInterval = parseInt(monthMatch[1], 10);
+    }
+  }
+
+  if (monthInterval !== null) {
+    const lastDayOfMonth = new Date(dateToCheck.getFullYear(), dateToCheck.getMonth() + 1, 0).getDate();
+    const rawDay = String(dayOfMonthRaw).toLowerCase().trim();
+    let targetDay;
+
+    if (rawDay === 'last') {
+      targetDay = lastDayOfMonth;
+    } else if (rawDay && !isNaN(parseInt(rawDay, 10))) {
+      targetDay = parseInt(rawDay, 10);
+    } else if (startDate) {
+      targetDay = startDate.getDate();
+    } else {
+      return false;
+    }
+
+    // Clamp overflow so a "31" rule fires on the last day of short months instead of vanishing.
+    if (targetDay > lastDayOfMonth) targetDay = lastDayOfMonth;
+    if (dateToCheck.getDate() !== targetDay) return false;
+    if (monthInterval === 1) return true;
+    if (!startDate || dateToCheck < startDate) return false;
+
+    const monthDiff = (dateToCheck.getFullYear() - startDate.getFullYear()) * 12
+                    + (dateToCheck.getMonth() - startDate.getMonth());
+
+    return monthDiff >= 0 && monthDiff % monthInterval === 0;
+  }
+
   return false;
 }
