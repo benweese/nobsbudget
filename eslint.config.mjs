@@ -24,6 +24,8 @@ const projectGlobals = {
   SHEET_NAMES: "readonly",
   LAYOUT: "readonly",
   getRenamedVendor: "readonly",
+  columnToLetter: "readonly",        // ← add
+  isRecurringDateMatch: "readonly",  // ← add (used here + dashboard.js)
   updateDashboard: "readonly",
   populateNextMonth: "readonly",
 };
@@ -48,6 +50,14 @@ export default defineConfig([
       "no-console": "off",
       "prefer-const": "error",
       "no-var": "error",
+    },
+  },
+  {
+    files: ["utils.js"],
+    rules: {
+      "no-unused-vars": ["warn", {
+        varsIgnorePattern: "^(SHEET_NAMES|LAYOUT|columnToLetter|isRecurringDateMatch)$"
+      }],
     },
   },
 ]);

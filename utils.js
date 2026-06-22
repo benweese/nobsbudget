@@ -77,11 +77,32 @@ function isRecurringDateMatch(dateToCheck, rule) {
     if (interval === 1) return true;
     if (!startDate || dateToCheck < startDate) return false;
 
-    // UTC midnight day-count avoids daylight-saving drift across the interval.
     const MS_PER_DAY = 86400000;
     const toDayNumber = (d) => Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / MS_PER_DAY);
-    const weeksApart = (toDayNumber(dateToCheck) - toDayNumber(startDate)) / 7;
 
+    // Snap to the first target-weekday on or after the start date. This way a start
+    // date that isn't itself on the anchor weekday still yields clean weekly intervals
+    // instead of silently never matching.
+    const startOffset = (weekDayMap[targetWeekday] - startDate.getDay() + 7) % 7;
+    const anchorDayNumber = toDayNumber(startDate) + startOffset;
+
+    const weeksApart = (toDayNumber(dateToCheck) - anchorDayNumber) / 7;
+    return weeksApart >= 0 && weeksApart % interval === 0;
+  }if (interval !== null) {
+    if (!targetWeekday || dateToCheck.getDay() !== weekDayMap[targetWeekday]) return false;
+    if (interval === 1) return true;
+    if (!startDate || dateToCheck < startDate) return false;
+
+    const MS_PER_DAY = 86400000;
+    const toDayNumber = (d) => Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / MS_PER_DAY);
+
+    // Snap to the first target-weekday on or after the start date. This way a start
+    // date that isn't itself on the anchor weekday still yields clean weekly intervals
+    // instead of silently never matching.
+    const startOffset = (weekDayMap[targetWeekday] - startDate.getDay() + 7) % 7;
+    const anchorDayNumber = toDayNumber(startDate) + startOffset;
+
+    const weeksApart = (toDayNumber(dateToCheck) - anchorDayNumber) / 7;
     return weeksApart >= 0 && weeksApart % interval === 0;
   }
 

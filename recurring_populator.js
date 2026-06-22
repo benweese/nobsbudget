@@ -1,8 +1,10 @@
+/* exported populateNextMonthBudget */
 /**
  * Creates and populates the budget sheet for the next calendar month.
  * This function handles headers, recurring items, carry-over balance,
  * and summary formulas, all in one go.
  */
+// eslint-disable-next-line no-unused-vars
 function populateNextMonthBudget() {
   // --- INITIAL SETUP ---
   // Get the main spreadsheet file, the currently active sheet, and its name.
@@ -69,28 +71,27 @@ function populateNextMonthBudget() {
   Logger.log(`Sheet structure set: ${targetRowCount} rows, ${daysInMonth} day columns.`);
 
   // --- CARRY OVER PREVIOUS MONTH'S FINAL BALANCE ---
-  let prevBalance = 0;
-  try {
-    const lastRow = currentSheet.getLastRow();
-    const lastCol = currentSheet.getLastColumn();
-    if (lastRow > 0 && lastCol > 0) {
-      prevBalance = currentSheet.getRange(lastRow, lastCol).getValue();
-      if (isNaN(parseFloat(prevBalance))) {
-        prevBalance = 0;
-      }
-    }
-  } catch (e) {
-    Logger.log(`Error reading previous balance: ${e}. Setting carry-over to 0.`);
-    prevBalance = 0;
-  }
+  // Link A2 to the previous month's last-day End-of-Day balance via a live formula,
+  // so reconciling the prior month self-corrects this month's starting balance.
   const carryCell = newSheet.getRange(LAYOUT.CARRY_OVER_ROW, 1);
-  carryCell.setValue(prevBalance).setNumberFormat('$#,##0.00').setFontStyle('italic').setFontColor('#888888');
-  Logger.log(`Carry-over balance set to: ${prevBalance}`);
+  try {
+    const daysInPrevMonth = new Date(year, monthIndex + 1, 0).getDate();
+    /* exported */
+    const lastDayColLetter = columnToLetter(daysInPrevMonth);
+    // currentName is already validated as "Month YYYY"; quote it for sheet names with spaces.
+    const carryFormula = `='${currentName}'!${lastDayColLetter}${LAYOUT.EOD_BALANCE_ROW}`;
+    carryCell.setFormula(carryFormula);
+    Logger.log(`Carry-over linked to ${currentName}!${lastDayColLetter}${LAYOUT.EOD_BALANCE_ROW}`);
+  } catch (e) {
+    Logger.log(`Error setting carry-over formula: ${e}`);
+    carryCell.setValue(0);
+  }
+  carryCell.setNumberFormat('$#,##0.00').setFontStyle('italic').setFontColor('#888888');
 
   // --- EFFICIENTLY POPULATE RECURRING ITEMS ---
   const numTransactionRows = LAYOUT.TRANSACTION_END_ROW - LAYOUT.TRANSACTION_START_ROW + 1;
   const transactionRange = newSheet.getRange(LAYOUT.TRANSACTION_START_ROW, 1, numTransactionRows, daysInMonth);
-  let sheetValues = transactionRange.getValues();
+  const sheetValues = transactionRange.getValues();
 
   const cellsToUpdate = [];
   const recurringSheet = ss.getSheetByName(SHEET_NAMES.RECURRING);
