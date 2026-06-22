@@ -23,11 +23,11 @@ const gasGlobals = {
 const projectGlobals = {
   SHEET_NAMES: "readonly",
   LAYOUT: "readonly",
-  getRenamedVendor: "readonly",
-  columnToLetter: "readonly",        // ← add
-  isRecurringDateMatch: "readonly",  // ← add (used here + dashboard.js)
+  columnToLetter: "readonly",
+  isRecurringDateMatch: "readonly",
   updateDashboard: "readonly",
-  populateNextMonth: "readonly",
+  onOpen: "readonly",
+  populateNextMonthBudget: "readonly",
 };
 
 export default defineConfig([

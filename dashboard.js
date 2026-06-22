@@ -1,220 +1,200 @@
 /**
- * This script file is the engine for the "Am I Screwed?" dashboard.
- * It reads data from monthly sheets, performs calculations, and updates the dashboard tab.
+ * @OnlyCurrentDoc
+ * Dashboard engine — the "Am I Screwed?" report.
+ * Models checking balance (Line A) vs. true liquidity including the raidable
+ * mortgage buffer (Line B), warns if the escrow envelope won't be whole by
+ * month-end, and tracks manually-entered savings / debt. All failures surface.
  */
 
-/**
- * Reads all transaction data from a specified monthly sheet and returns it as an array of objects.
- * This is the primary data source for all other dashboard calculations.
- * @param {string} sheetName The name of the monthly sheet to read (e.g., "September 2025").
- * @return {Array<Object>} An array of structured transaction objects.
- */
-function getAllMonthTransactions(sheetName) {
-  // --- INITIAL SETUP AND VALIDATION ---
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(sheetName);
+const DASH = { ESCROW_CELL: 'C17', SAVINGS_CELL: 'C21', NOVAKS_CELL: 'C22' };
+const CUR = '$#,##0.00;[Red]-$#,##0.00';
+const ESCROW_DEFAULT = 4120; // fallback if the escrow cell is blank — never silently disable the warning
 
-  if (!sheet) {
-    Logger.log(`getAllMonthTransactions: Sheet "${sheetName}" not found.`);
-    return [];
-  }
-
-  // Define the transaction area using constants from utils.gs.
-  const START_ROW = LAYOUT.TRANSACTION_START_ROW;
-  const END_ROW = LAYOUT.TRANSACTION_END_ROW;
-  const numRows = END_ROW - START_ROW + 1;
-
-  const lastCol = sheet.getLastColumn();
-  if (lastCol === 0 || numRows <= 0) {
-    Logger.log(`getAllMonthTransactions: Sheet "${sheetName}" appears empty.`);
-    return [];
-  }
-
-  // --- PARSE DATE FROM SHEET NAME ---
-  // We derive the month and year from the sheet's name for reliability.
-  let year, monthIndex;
-  try {
-    const nameParts = sheetName.match(/^(\w+)\s+(\d{4})$/);
-    if (!nameParts) throw new Error("Invalid sheet name format.");
-    const monthName = nameParts[1];
-    year = parseInt(nameParts[2]);
-    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-    monthIndex = months.indexOf(monthName); // JS months are 0-indexed.
-    if (monthIndex === -1) throw new Error(`Invalid month name "${monthName}".`);
-  } catch (e) {
-    Logger.log(`getAllMonthTransactions: Error parsing sheet name "${sheetName}": ${e}.`);
-    return [];
-  }
-
-  // --- BATCH READ DATA FROM SPREADSHEET ---
-  // Read all values and notes in two efficient operations.
-  let values = [];
-  let notes = [];
-  try {
-    const range = sheet.getRange(START_ROW, 1, numRows, lastCol);
-    values = range.getValues();
-    notes = range.getNotes();
-  } catch (e) {
-    Logger.log(`getAllMonthTransactions: Error reading data range in "${sheetName}": ${e}.`);
-    return [];
-  }
-
-  // --- PROCESS DATA IN MEMORY ---
-  // Loop through the in-memory arrays to build the transaction list.
-  const transactions = [];
-  for (let j = 0; j < lastCol; j++) {
-    const colNum = j + 1;
-    for (let i = 0; i < numRows; i++) {
-      const value = values[i][j];
-      const rowNum = i + START_ROW;
-      // Skip empty cells and the A2 carry-over balance.
-      if (value === '' || value === null) continue;
-      if (rowNum === LAYOUT.CARRY_OVER_ROW && colNum === 1) continue;
-
-      // Create a structured object for each transaction.
-      try {
-        const date = new Date(year, monthIndex, colNum);
-        const amount = parseFloat(value);
-        transactions.push({
-          date: date,
-          amount: isNaN(amount) ? 0 : amount,
-          note: notes[i][j] || "",
-          column: colNum,
-          row: rowNum
-        });
-      } catch (e) {
-        Logger.log(`Error processing cell ${sheetName}!R${rowNum}C${colNum}: ${e}`);
-      }
-    }
-  }
-  return transactions;
+/** Formats a number as signed USD. e.g. -1910 -> "-$1,910.00". */
+function money(n) {
+  const p = (Math.round(Math.abs(n) * 100) / 100).toFixed(2).split('.');
+  p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return (n < 0 ? '-$' : '$') + p.join('.');
 }
 
-/**
- * Calculates total cash income and expenses for a given month from its transaction list.
- * @param {string} sheetName The name of the monthly sheet (e.g., "September 2025").
- * @return {object} An object with { income: number, expenses: number }.
- */
-function getMonthlyCashFlowSummary(sheetName) {
-  // Get all transactions for the month.
-  const transactions = getAllMonthTransactions(sheetName);
-  if (!transactions) {
-    return { income: 0, expenses: 0 };
-  }
-  // Sum up positive (income) and negative (expense) amounts.
-  let totalIncome = 0;
-  let totalExpenses = 0;
-  transactions.forEach(transaction => {
-    if (transaction.amount > 0) {
-      totalIncome += transaction.amount;
-    } else if (transaction.amount < 0) {
-      totalExpenses += transaction.amount;
-    }
-  });
-  return {
-    income: totalIncome,
-    expenses: totalExpenses
-  };
+/** Ordinal form of a day. e.g. 14 -> "14th". */
+function ordinal(d) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const m = d % 100;
+  return d + (s[(m - 20) % 10] || s[m] || s[0]);
 }
 
-/**
- * Reads the 'Recurring' sheet and calculates the total estimated amount of all
- * predictable, fixed expenses for a given month.
- * @param {string} sheetName The name of the month to calculate for (e.g., "September 2025").
- * @return {number} The total amount of fixed expenses for the month (as a negative number).
- */
-function getMonthlyRecurringTotal(sheetName) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const recurringSheet = ss.getSheetByName(SHEET_NAMES.RECURRING);
-  if (!recurringSheet) return 0;
-
-  // Parse the month and year from the sheet name.
-  const nameParts = sheetName.match(/^(\w+)\s+(\d{4})$/);
-  if (!nameParts) return 0;
-  const monthName = nameParts[1];
-  const year = parseInt(nameParts[2]);
-  const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-  const monthIndex = months.indexOf(monthName);
-  if (monthIndex === -1) return 0;
-  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-
-  let totalRecurringExpenses = 0;
-  const recurringData = recurringSheet.getRange(2, 1, recurringSheet.getLastRow() - 1, 5).getValues();
-
-  // Loop through each rule to see if it applies to any day in the target month.
-  recurringData.forEach(([dayOfMonthRaw, name, amount, frequency, startDateRaw]) => {
-    // Only sum up expenses (negative amounts).
-    if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) >= 0) {
-      return; 
-    }
-    const numericAmount = parseFloat(amount);
-    
-    for (let day = 1; day <= daysInMonth; day++) {
-      const thisDate = new Date(year, monthIndex, day);
-      // Create a rule object to pass to our central logic function.
-      const rule = { 
-        dayOfMonthRaw: dayOfMonthRaw, 
-        frequency: frequency, 
-        startDate: startDateRaw instanceof Date ? startDateRaw : (startDateRaw ? new Date(startDateRaw) : null)
-      };
-      // Use the central, authoritative function from utils.gs to check for a match.
-      const isMatch = isRecurringDateMatch(thisDate, rule);
-      if (isMatch) {
-        totalRecurringExpenses += numericAmount;
-      }
-    }
-  });
-  return totalRecurringExpenses;
+/** Lowest value in a daily array + the 1-based day it occurs. */
+function findTrough(arr) {
+  let value = Infinity, day = 1;
+  arr.forEach((v, i) => { if (v < value) { value = v; day = i + 1; } });
+  return { value, day };
 }
-
-
-/**
- * MASTER DASHBOARD UPDATE FUNCTION
- * This is the single function to call to refresh all metrics on the dashboard.
- * It calculates and displays the monthly summary and the daily spend limit.
- */
+// eslint-disable-next-line no-unused-vars
 function updateDashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const dashboardSheet = ss.getSheetByName("Dashboard");
-  if (!dashboardSheet) {
-    SpreadsheetApp.getUi().alert('The "Dashboard" sheet is missing. Please create it.');
+  const ui = SpreadsheetApp.getUi();
+  const dash = ss.getSheetByName('Dashboard');
+  if (!dash) { ui.alert('Create a tab named "Dashboard" first.'); return; }
+
+  const now = new Date();
+  const monthName = Utilities.formatDate(now, ss.getSpreadsheetTimeZone(), 'MMMM yyyy');
+  const month = ss.getSheetByName(monthName);
+  if (!month) { ui.alert(`Monthly sheet "${monthName}" not found.`); return; }
+
+  // Preserve manual inputs BEFORE rebuilding. Escrow falls back to default if blank.
+  const escrowTarget = parseFloat(dash.getRange(DASH.ESCROW_CELL).getValue()) || ESCROW_DEFAULT;
+  const savings = parseFloat(dash.getRange(DASH.SAVINGS_CELL).getValue()) || 0;
+  const owedNovaks = parseFloat(dash.getRange(DASH.NOVAKS_CELL).getValue()) || 0;
+
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const todayCol = Math.min(now.getDate(), daysInMonth);
+  const daysRemaining = Math.max(1, daysInMonth - now.getDate() + 1);
+  const numRows = LAYOUT.TRANSACTION_END_ROW - LAYOUT.TRANSACTION_START_ROW + 1;
+  const lastIdx = daysInMonth - 1;
+
+  let txVals, txNotes, eod;
+  try {
+    const r = month.getRange(LAYOUT.TRANSACTION_START_ROW, 1, numRows, daysInMonth);
+    txVals = r.getValues();
+    txNotes = r.getNotes();
+    eod = month.getRange(LAYOUT.EOD_BALANCE_ROW, 1, 1, daysInMonth).getValues()[0];
+  } catch (e) {
+    Logger.log(`Dashboard read error: ${e}`);
+    ui.alert(`Could not read "${monthName}": ${e}`);
     return;
   }
 
-  // --- Date & Sheet Setup ---
-  const now = new Date();
-  const today = now.getDate();
-  const currentMonthSheetName = Utilities.formatDate(now, ss.getSpreadsheetTimeZone(), "MMMM yyyy");
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const daysRemaining = daysInMonth - today + 1;
+  // Line A = checking balance as the sheet shows it (mortgage already subtracted).
+  const lineA = eod.map(v => { const n = parseFloat(v); return isNaN(n) ? 0 : n; });
 
-  // --- Calculations ---
-  // 1. Get all cash flow transactions that have happened so far this month.
-  const summary = getMonthlyCashFlowSummary(currentMonthSheetName);
-  
-  // 2. Get the total of all PREDICTED fixed bills for the entire month.
-  const totalBills = getMonthlyRecurringTotal(currentMonthSheetName);
-  
-  // 3. Calculate how much money is left for non-fixed spending.
-  // Formula: (Income To Date) + (Total Bills for Month) + (Expenses To Date)
-  const discretionaryBudgetLeft = summary.income + totalBills + summary.expenses;
-
-  // 4. Calculate the daily limit for remaining days.
-  let dailyLimit = 0;
-  if (daysRemaining > 0 && discretionaryBudgetLeft > 0) {
-    dailyLimit = discretionaryBudgetLeft / daysRemaining;
+  // One in-memory pass: signed mortgage movements, locked last-day payment, non-mortgage expenses.
+  const mortgageNet = new Array(daysInMonth).fill(0); // neg = set aside, pos = raid
+  let lockedPayment = 0;
+  const expenses = [];
+  for (let col = 0; col < daysInMonth; col++) {
+    for (let row = 0; row < numRows; row++) {
+      const amt = parseFloat(txVals[row][col]);
+      if (isNaN(amt) || amt === 0) continue;
+      const note = String(txNotes[row][col]).toLowerCase();
+      if (note.includes('mortgage')) {
+        if (col === lastIdx && amt < 0) lockedPayment += Math.abs(amt); // locked, not raidable
+        else mortgageNet[col] += amt;
+      } else if (amt < 0) {
+        expenses.push({ amount: amt, day: col + 1, vendor: txNotes[row][col] || '(no note)' });
+      }
+    }
   }
 
-  // --- Display on Dashboard ---
-  dashboardSheet.getRange("A2").setValue("Total Income:");
-  dashboardSheet.getRange("B2").setValue(summary.income).setNumberFormat('$#,##0.00');
-  
-  dashboardSheet.getRange("A3").setValue("Total Expenses:");
-  dashboardSheet.getRange("B3").setValue(summary.expenses).setNumberFormat('$#,##0.00;(#,##0.00)');
-  
-  dashboardSheet.getRange("A4").setValue("Daily Spend Limit (Non-Fixed):");
-  dashboardSheet.getRange("B4").setValue(dailyLimit).setNumberFormat('$#,##0.00');
-  
-  SpreadsheetApp.getUi().alert('✅ Dashboard has been refreshed!');
-  Logger.log(`Dashboard Refreshed. Daily Spend Limit: ${dailyLimit}`);
+  // Line B = checking + cumulative raidable buffer parked to date (floored at 0).
+  let cumulative = 0;
+  const lineB = lineA.map((bal, i) => { cumulative += -mortgageNet[i]; return bal + Math.max(0, cumulative); });
+
+  // Envelope at month-end = locked last-day payment + everything set aside minus raided.
+  const envelopeAtEOM = lockedPayment + cumulative;
+  const shortfall = envelopeAtEOM - escrowTarget; // negative = short
+
+  let raidableToDate = 0;
+  for (let i = 0; i < todayCol; i++) raidableToDate += -mortgageNet[i];
+  raidableToDate = Math.max(0, raidableToDate);
+
+  const tA = findTrough(lineA);
+  const tB = findTrough(lineB);
+  const monthEnd = lineA[lastIdx];
+  const safePerDay = Math.max(0, monthEnd) / daysRemaining;
+  expenses.sort((a, b) => a.amount - b.amount); // most negative first
+  const top3 = expenses.slice(0, 3);
+
+  // Problems list — every failure surfaces; highest severity drives the banner.
+  const problems = [];
+  if (tB.value < 0) {
+    problems.push({ sev: 3, msg: `Liquidity underwater by ${money(tB.value)} on the ${ordinal(tB.day)} even after raiding the buffer.` });
+  } else if (tA.value < 0) {
+    problems.push({ sev: 2, msg: `Checking dips to ${money(tA.value)} on the ${ordinal(tA.day)} — floating on the mortgage buffer.` });
+  }
+  if (monthEnd < 0) {
+    problems.push({ sev: 3, msg: `Checking ends the month at ${money(monthEnd)}.` });
+  }
+  if (shortfall < 0) {
+    problems.push({ sev: 3, msg: `Escrow envelope projected at ${money(envelopeAtEOM)} — ${money(Math.abs(shortfall))} short of the ${money(escrowTarget)} due. Repay what you raided before month-end.` });
+  }
+
+  const maxSev = problems.reduce((m, p) => Math.max(m, p.sev), 0);
+  let verdict, bg, fg;
+  if (maxSev === 3) { verdict = '🔴 SCREWED'; bg = '#f4cccc'; fg = '#990000'; }
+  else if (maxSev === 2) { verdict = '🟡 TIGHT'; bg = '#fff2cc'; fg = '#7f6000'; }
+  else { verdict = '🟢 FINE'; bg = '#d9ead3'; fg = '#38761d'; }
+  const why = problems.length
+    ? problems.map(p => p.msg).join('  •  ')
+    : `Lowest point ${money(tA.value)} on the ${ordinal(tA.day)}, buffer whole, escrow covered. Spend within the daily limit.`;
+
+  // --- LAYOUT (col B label, col C value), starting at row 2 ---
+  const rows = [
+    [`Am I Screwed?   —   ${monthName}`, ''],            // 2
+    ['', ''],                                             // 3
+    [verdict, ''],                                        // 4
+    [why, ''],                                            // 5
+    ['', ''],                                             // 6
+    ['CASH FLOW DANGER', ''],                             // 7
+    [`Lowest checking  (${ordinal(tA.day)})`, tA.value],  // 8
+    [`Lowest w/ float  (${ordinal(tB.day)})`, tB.value],  // 9
+    ['Projected month-end', monthEnd],                    // 10
+    ['Safe to spend / day left', safePerDay],             // 11
+    ['', ''],                                             // 12
+    ['MORTGAGE ENVELOPE', ''],                            // 13
+    ['Set aside, raidable (to date)', raidableToDate],    // 14
+    ['Locked payment (last day)', lockedPayment],         // 15
+    ['Projected at month-end', envelopeAtEOM],            // 16
+    ['Required (escrow) — EDITABLE', escrowTarget],       // 17
+    ['Shortfall / surplus', shortfall],                   // 18
+    ['', ''],                                             // 19
+    ['MANUAL — edit the blue cells', ''],                 // 20
+    ['Current savings', savings],                         // 21
+    ['Owed to the Novaks', owedNovaks],                   // 22
+    ['Net (savings − Novaks)', savings - owedNovaks],     // 23
+    ['', ''],                                             // 24
+    ['BIGGEST EXPENSES', ''],                             // 25
+    [top3[0] ? `${top3[0].vendor}  (${ordinal(top3[0].day)})` : '—', top3[0] ? top3[0].amount : ''], // 26
+    [top3[1] ? `${top3[1].vendor}  (${ordinal(top3[1].day)})` : '', top3[1] ? top3[1].amount : ''],  // 27
+    [top3[2] ? `${top3[2].vendor}  (${ordinal(top3[2].day)})` : '', top3[2] ? top3[2].amount : ''],  // 28
+  ];
+
+  dash.getRange('A1:H40').clear();
+  dash.getRange(2, 2, rows.length, 2).setValues(rows);
+
+  // --- FORMATTING ---
+  dash.setColumnWidth(1, 30).setColumnWidth(2, 250).setColumnWidth(3, 200);
+  ['B2:C2', 'B4:C4', 'B5:C5', 'B7:C7', 'B13:C13', 'B20:C20', 'B25:C25'].forEach(rng => dash.getRange(rng).merge());
+
+  dash.getRange('B2').setBackground('#434343').setFontColor('#ffffff').setFontWeight('bold').setFontSize(16).setHorizontalAlignment('center');
+  dash.setRowHeight(2, 36).setRowHeight(4, 46);
+  dash.getRange('B4').setBackground(bg).setFontColor(fg).setFontWeight('bold').setFontSize(20).setHorizontalAlignment('center');
+  dash.getRange('B5').setFontColor('#666666').setFontStyle('italic').setWrap(true).setFontSize(10);
+
+  ['B7', 'B13', 'B20', 'B25'].forEach(c =>
+    dash.getRange(c).setBackground('#f1f3f4').setFontWeight('bold').setFontColor('#5f6368').setFontSize(11));
+
+  // Currency cells: right-aligned, bold, red negatives.
+  ['C8:C11', 'C14:C18', 'C21:C23', 'C26:C28'].forEach(rng =>
+    dash.getRange(rng).setNumberFormat(CUR).setHorizontalAlignment('right').setFontWeight('bold'));
+
+  // Card backgrounds + light borders.
+  ['B8:C11', 'B14:C18', 'B26:C28'].forEach(rng =>
+    dash.getRange(rng).setBackground('#f8f9fa').setBorder(true, true, true, true, false, false, '#e0e0e0', SpreadsheetApp.BorderStyle.SOLID));
+
+  // Shortfall punchline goes red when the envelope won't be whole.
+  if (shortfall < 0) {
+    dash.getRange('B18:C18').setBackground('#fce5e0').setFontColor('#990000').setFontWeight('bold');
+  }
+
+  // Editable blue cells (applied last so they win over the gray card): escrow, savings, Novaks.
+  ['C17', 'C21', 'C22'].forEach(c =>
+    dash.getRange(c).setBackground('#e8f0fe').setBorder(true, true, true, true, true, true, '#a4c2f4', SpreadsheetApp.BorderStyle.SOLID));
+  dash.getRange('C17').setNote('Edit me — full escrow/mortgage amount due at month-end');
+  dash.getRange('C21').setNote('Edit me — current savings balance');
+  dash.getRange('C22').setNote('Edit me — total owed to the Novaks');
+  dash.getRange('B23:C23').setBackground('#f8f9fa');
+
+  SpreadsheetApp.flush();
+  ui.alert(`✅ Dashboard updated for ${monthName}.\nVerdict: ${verdict}`);
 }
