@@ -29,41 +29,6 @@ function toNum(v) {
   return isNaN(n) ? null : n;
 }
 
-function debugDash() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const tz = ss.getSpreadsheetTimeZone();
-  const now = new Date();
-  const curName = Utilities.formatDate(now, tz, 'MMMM yyyy');
-  const nextName = Utilities.formatDate(new Date(now.getFullYear(), now.getMonth() + 1, 1), tz, 'MMMM yyyy');
-
-  Logger.log(`Looking for current: "${curName}"  next: "${nextName}"`);
-  Logger.log('--- ACTUAL TAB NAMES IN THIS FILE ---');
-  ss.getSheets().forEach(s => Logger.log(`   "${s.getName()}"`));
-
-  Logger.log(`current found? ${!!ss.getSheetByName(curName)}   next found? ${!!ss.getSheetByName(nextName)}`);
-
-  const numRows = LAYOUT.TRANSACTION_END_ROW - LAYOUT.TRANSACTION_START_ROW + 1;
-  const cur = ss.getSheetByName(curName);
-  if (cur) {
-    Logger.log('--- mortgage-noted entries in current month ---');
-    const days = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-    const vals = cur.getRange(LAYOUT.TRANSACTION_START_ROW, 1, numRows, days).getValues();
-    const notes = cur.getRange(LAYOUT.TRANSACTION_START_ROW, 1, numRows, days).getNotes();
-    let total = 0, found = 0;
-    for (let c = 0; c < days; c++) {
-      for (let r = 0; r < numRows; r++) {
-        const note = String(notes[r][c]).toLowerCase();
-        if (note.includes('mortgage')) {
-          Logger.log(`   day ${c + 1}: value=${JSON.stringify(vals[r][c])}  note="${notes[r][c]}"`);
-          const n = parseFloat(String(vals[r][c]).replace(/[$,\s]/g, ''));
-          if (!isNaN(n)) { total += -n; found++; }
-        }
-      }
-    }
-    Logger.log(`   >>> ${found} mortgage entries, total set aside = ${total}`);
-  }
-}
-
 /** Lowest non-empty value + its 1-based day. Empty cells can't fake a $0 trough. */
 function findTrough(arr) {
   let value = Infinity, day = 1;
@@ -82,22 +47,23 @@ function updateDashboard() {
   const tz = ss.getSpreadsheetTimeZone();
   const dash = ss.getSheetByName('Dashboard');
   if (!dash) { ui.alert('Create a tab named "Dashboard" first.'); return; }
-
+  
  const now = new Date();
-  // Build month names from the spreadsheet's timezone-anchored year/month to avoid
-  // date-rollover/timezone drift (which was making "next" resolve to the current month).
+  // Read Y/M/D in the SHEET's timezone, do integer month math, build names from a
+  // lookup. Never reformat a constructed Date across timezones — the gap between the
+  // script clock (GMT-0500) and the sheet tz (GMT-0600) was rolling day-1 back a month.
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+                  'July', 'August', 'September', 'October', 'November', 'December'];
   const curY = parseInt(Utilities.formatDate(now, tz, 'yyyy'), 10);
   const curM = parseInt(Utilities.formatDate(now, tz, 'MM'), 10) - 1; // 0-indexed
   const curDay = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
   const nextY = curM === 11 ? curY + 1 : curY;
   const nextM = (curM + 1) % 12;
 
-  const curDate = new Date(curY, curM, 1);
-  const nextDate = new Date(nextY, nextM, 1);
-  const curName = Utilities.formatDate(curDate, tz, 'MMMM yyyy');
-  const curLabel = Utilities.formatDate(curDate, tz, 'MMMM');
-  const nextName = Utilities.formatDate(nextDate, tz, 'MMMM yyyy');
-  const nextLabel = Utilities.formatDate(nextDate, tz, 'MMMM');
+  const curLabel = MONTHS[curM];
+  const nextLabel = MONTHS[nextM];
+  const curName = `${curLabel} ${curY}`;
+  const nextName = `${nextLabel} ${nextY}`;
 
   const curSheet = ss.getSheetByName(curName);
   if (!curSheet) { ui.alert(`Monthly sheet "${curName}" not found.`); return; }
