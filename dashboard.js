@@ -29,6 +29,41 @@ function toNum(v) {
   return isNaN(n) ? null : n;
 }
 
+function debugDash() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tz = ss.getSpreadsheetTimeZone();
+  const now = new Date();
+  const curName = Utilities.formatDate(now, tz, 'MMMM yyyy');
+  const nextName = Utilities.formatDate(new Date(now.getFullYear(), now.getMonth() + 1, 1), tz, 'MMMM yyyy');
+
+  Logger.log(`Looking for current: "${curName}"  next: "${nextName}"`);
+  Logger.log('--- ACTUAL TAB NAMES IN THIS FILE ---');
+  ss.getSheets().forEach(s => Logger.log(`   "${s.getName()}"`));
+
+  Logger.log(`current found? ${!!ss.getSheetByName(curName)}   next found? ${!!ss.getSheetByName(nextName)}`);
+
+  const numRows = LAYOUT.TRANSACTION_END_ROW - LAYOUT.TRANSACTION_START_ROW + 1;
+  const cur = ss.getSheetByName(curName);
+  if (cur) {
+    Logger.log('--- mortgage-noted entries in current month ---');
+    const days = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const vals = cur.getRange(LAYOUT.TRANSACTION_START_ROW, 1, numRows, days).getValues();
+    const notes = cur.getRange(LAYOUT.TRANSACTION_START_ROW, 1, numRows, days).getNotes();
+    let total = 0, found = 0;
+    for (let c = 0; c < days; c++) {
+      for (let r = 0; r < numRows; r++) {
+        const note = String(notes[r][c]).toLowerCase();
+        if (note.includes('mortgage')) {
+          Logger.log(`   day ${c + 1}: value=${JSON.stringify(vals[r][c])}  note="${notes[r][c]}"`);
+          const n = parseFloat(String(vals[r][c]).replace(/[$,\s]/g, ''));
+          if (!isNaN(n)) { total += -n; found++; }
+        }
+      }
+    }
+    Logger.log(`   >>> ${found} mortgage entries, total set aside = ${total}`);
+  }
+}
+
 /** Lowest non-empty value + its 1-based day. Empty cells can't fake a $0 trough. */
 function findTrough(arr) {
   let value = Infinity, day = 1;
@@ -48,10 +83,19 @@ function updateDashboard() {
   const dash = ss.getSheetByName('Dashboard');
   if (!dash) { ui.alert('Create a tab named "Dashboard" first.'); return; }
 
-  const now = new Date();
-  const curName = Utilities.formatDate(now, tz, 'MMMM yyyy');
-  const curLabel = Utilities.formatDate(now, tz, 'MMMM');
-  const nextDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+ const now = new Date();
+  // Build month names from the spreadsheet's timezone-anchored year/month to avoid
+  // date-rollover/timezone drift (which was making "next" resolve to the current month).
+  const curY = parseInt(Utilities.formatDate(now, tz, 'yyyy'), 10);
+  const curM = parseInt(Utilities.formatDate(now, tz, 'MM'), 10) - 1; // 0-indexed
+  const curDay = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
+  const nextY = curM === 11 ? curY + 1 : curY;
+  const nextM = (curM + 1) % 12;
+
+  const curDate = new Date(curY, curM, 1);
+  const nextDate = new Date(nextY, nextM, 1);
+  const curName = Utilities.formatDate(curDate, tz, 'MMMM yyyy');
+  const curLabel = Utilities.formatDate(curDate, tz, 'MMMM');
   const nextName = Utilities.formatDate(nextDate, tz, 'MMMM yyyy');
   const nextLabel = Utilities.formatDate(nextDate, tz, 'MMMM');
 
@@ -63,8 +107,8 @@ function updateDashboard() {
   const savings = parseFloat(dash.getRange(DASH.SAVINGS_CELL).getValue()) || 0;
   const owedNovaks = parseFloat(dash.getRange(DASH.NOVAKS_CELL).getValue()) || 0;
 
-  const daysInCur = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const daysInNext = new Date(nextDate.getFullYear(), nextDate.getMonth() + 1, 0).getDate();
+  const daysInCur = new Date(curY, curM + 1, 0).getDate();
+  const daysInNext = new Date(nextY, nextM + 1, 0).getDate();
   const numRows = LAYOUT.TRANSACTION_END_ROW - LAYOUT.TRANSACTION_START_ROW + 1;
 
   let curTxVals, curTxNotes, curChecking;
@@ -115,7 +159,7 @@ function updateDashboard() {
   const daysNegative = combined.filter(v => v !== null && v < 0).length;
   const populated = combined.filter(v => v !== null);
   const runwayEnd = populated.length ? populated[populated.length - 1] : 0;
-  const daysRemaining = Math.max(1, (daysInCur - now.getDate() + 1) + (spanningBoth ? daysInNext : 0));
+  const daysRemaining = Math.max(1, (daysInCur - curDay + 1) + (spanningBoth ? daysInNext : 0));
   const safePerDay = Math.max(0, runwayEnd) / daysRemaining;
   const finishLabel = spanningBoth ? nextLabel : curLabel;
 
@@ -152,7 +196,9 @@ function updateDashboard() {
   } else {
     scarySentence = 'Even at its lowest, checking stays above zero. Breathing room the whole stretch.';
   }
-  const mortgageStatus = shortfall >= 0 ? '✅ Yes' : `⚠️ No — ${money(Math.abs(shortfall))} short`;
+  const mortgageStatus = shortfall >= 0
+    ? `✅ ${money(mortgageAllocated)} of ${money(escrowTarget)}`
+    : `⚠️ ${money(mortgageAllocated)} of ${money(escrowTarget)} — ${money(Math.abs(shortfall))} short`;
   const mortgageSentence = shortfall >= 0
     ? `The full ${money(escrowTarget)} is set aside and ready for the payment.`
     : `Set aside ${money(mortgageAllocated)} of ${money(escrowTarget)} — ${money(Math.abs(shortfall))} to go before month-end.`;
